@@ -18,7 +18,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
+          # Do not auto-recursively checkout submodules. One submodule ('trade') is misconfigured
+          # and breaks recursive checkout. We will init only the changed submodules later.
+          submodules: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -32,6 +34,34 @@ jobs:
           pip install -r codechat/requirements.txt || true
           # Core sync deps (serverless Pinecone SDK)
           pip install --upgrade tiktoken tree_sitter tqdm pyyaml pandas pinecone openai
+
+      - name: Init changed submodules (shallow)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compute BASE and HEAD for this event (same logic as the sync step)
+          if [ "${{ github.event_name }}" = "push" ]; then
+            BASE="${{ github.event.before }}"; HEAD="${{ github.sha }}"
+          else
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.merge_commit_sha }}"
+            if [ -z "$HEAD" ]; then HEAD="${{ github.sha }}"; fi
+          fi
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE="${HEAD}^"
+          fi
+          echo "[info] Diff for submodule init: $BASE..$HEAD"
+          # Get unique list of changed submodules from the commit range
+          changed_subs=$(git diff --submodule=short "$BASE" "$HEAD" | awk '/^Submodule /{print $2}' | sort -u)
+          if [ -z "$changed_subs" ]; then
+            echo "[info] No submodule pointer changes detected."
+            exit 0
+          fi
+          echo "[info] Initializing changed submodules: $changed_subs"
+          for sm in $changed_subs; do
+            # Initialize only the changed submodule paths (avoid broken entries elsewhere)
+            git submodule update --init --depth 1 -- "$sm"
+          done
 
       - name: Run VectorDB Sync (commit-range)
         env:
