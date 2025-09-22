@@ -51,16 +51,34 @@ jobs:
             BASE="${HEAD}^"
           fi
           echo "[info] Diff for submodule init: $BASE..$HEAD"
-          # Get unique list of changed submodules from the commit range
-          changed_subs=$(git diff --submodule=short "$BASE" "$HEAD" | awk '/^Submodule /{print $2}' | sort -u)
-          if [ -z "$changed_subs" ]; then
+          # Parse changed submodules and their SHAs from the commit range
+          mapfile -t lines < <(git diff --submodule=short "$BASE" "$HEAD" | grep '^Submodule ' || true)
+          if [ ${#lines[@]} -eq 0 ]; then
             echo "[info] No submodule pointer changes detected."
             exit 0
           fi
-          echo "[info] Initializing changed submodules: $changed_subs"
-          for sm in $changed_subs; do
-            # Initialize only the changed submodule paths (avoid broken entries elsewhere)
-            git submodule update --init --depth 1 -- "$sm"
+          echo "[info] Found ${#lines[@]} changed submodule pointers"
+          for line in "${lines[@]}"; do
+            sm=$(echo "$line" | awk '{print $2}')
+            range=$(echo "$line" | awk '{print $3}')
+            oldsha=$(echo "$range" | sed -E 's/^([0-9a-f]+)\.\.([0-9a-f]+).*$/\1/')
+            newsha=$(echo "$range" | sed -E 's/^([0-9a-f]+)\.\.([0-9a-f]+).*$/\2/')
+            # Validate .gitmodules mapping; skip misconfigured entries
+            url=$(git config -f .gitmodules --get "submodule.$sm.url" || true)
+            if [ -z "$url" ]; then
+              echo "[warn] Skipping submodule '$sm': no URL in .gitmodules"
+              continue
+            fi
+            echo "[info] Init submodule '$sm' ($oldsha..$newsha)"
+            git submodule update --init --depth 1 -- "$sm" || { echo "[warn] init failed for '$sm'"; continue; }
+            # Ensure both SHAs exist locally to allow inner diffs even with shallow clones
+            if [[ "$oldsha" =~ ^0+$ ]]; then oldsha=""; fi
+            if [ -n "$oldsha" ]; then
+              git -C "$sm" fetch --no-tags --depth=1 origin "$oldsha" || true
+            fi
+            if [ -n "$newsha" ]; then
+              git -C "$sm" fetch --no-tags --depth=1 origin "$newsha" || true
+            fi
           done
 
       - name: Run VectorDB Sync (commit-range)
